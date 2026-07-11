@@ -1,7 +1,9 @@
 # zzh的复现Minmind
 1.本项目复现Minmind (项目链接：https://github.com/minmind/minmind)  
 2.跟着up主（Mokio）视频：https://www.bilibili.com/video/BV1T2k6BaEeC?p=6&vd_source=17a936cc4bdf336ce68bd6a091daa956
+
 3.记录自己的学习过程也是为了加深印象
+
 # 复现过程
 ## 初始化项目
 
