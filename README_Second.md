@@ -8,6 +8,8 @@
 ## 初始化项目
 
 ### 1. 创建项目zzh_minmind
+
+
 ### 2. vscode 初始化项目
 #### 2.1 配置uv
 <img src="images\uv_install.png" width="700" alt="uv安装演示">
@@ -39,3 +41,14 @@ dependencies =
 
 #### 2.3 创建项目结构
 <img src="images\explain_file.png" width="700" alt="项目结构">
+
+
+### 2. 复现model.py
+
+#### 2.1 RMSNorm
+
+<p style="text-indent: 2em;">全称 Root Mean Square Normalization，均方根归一化
+<p style="text-indent: 2em;">作用：把输入特征向量的数值压缩到稳定区间，让深层 Transformer 训练不震荡、梯度不容易消失，LLaMA、MiniMind 这类大模型全部用它替代传统 LayerNorm，计算更快。
+<p style="text-indent: 2em;">其实不用理解，记住公式就好：
+<img src="images\RMSNorm.png" width="700" alt="NmsNorm">
+
