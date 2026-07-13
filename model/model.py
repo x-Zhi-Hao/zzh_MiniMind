@@ -87,82 +87,86 @@ class RmsNorm(nn.Module):
     def forward(self,x):
         return self.weight*self._norm(x.float()).type_as(x)
     
+    
+#part two
 
-
-#提前一次性算出 RoPE 编码所需的全部预计算余弦、正弦旋转参数，原生 RoPE 直接输出；
-# 传入rope_scaling字典时会嵌入YaRN 长文本扩展算法，适配远超训练长度的推理场景，
-# 最终返回freqs_cos、freqs_sin供给apply_rotary_pos_emb做 Q/K 向量旋转。
+#precompute_freqs函数用于提前计算RoPE编码所需的余弦和正弦旋转参数。它接受以下参数：
 def precompute_freqs(
-    dim: int,
-    end: int = int(32 * 1024),
-    rope_base: float = 1e6,
-    rope_scaling: Optional[dict] = None,
+    dim: int,#维度
+    end: int = int(32*1024),#传入序列长度，缺省32*1024
+    rope_base: float = 1e6,#默认1e6，为公式中提到的base
+    rope_scaling: Optional[dict] =None,#RoPE 长度外推缩放配置
 ):
-    # 1. 初始化标准 RoPE 频率。
-    # torch.arange(0, dim, 2) 生成 [0, 2, 4, ... dim-2]
-    # 计算出的 freqs 就是标准的 1 / (base ** (2i / d))
     freqs, attn_factor = (
-        1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)),
-        1.0,
+        #feqs为标准RoPE频率，attn_factor为注意力温度补偿系数
+        1.0 / (rope_base ** (torch.arange(0,dim,2)[:(dim//2)].float() / dim)),#RoPE_Core_Frequency_Formula
+        1.0          
     )
-
+    
     if rope_scaling is not None:
-        # 2. 从配置字典中提取 YaRN 的超参数
-        # orig_max: 模型预训练时的原始最大长度（例如 Llama-2 是 2048 或 4096）
-        # factor: 要扩展的倍数 s (比如从 2k 扩展到 32k，factor 就是 16)
-        # beta_fast (对应论文中的 α): 高频边界，波长比例大于此值的维度不缩放
-        # beta_slow (对应论文中的 β): 低频边界，波长比例小于此值的维度全量缩放
-        # attn_factor: 注意力温度补偿，由于距离拉长导致注意力分布发散（变平缓），需要乘上一个系数让注意力重新“聚焦”
-        orig_max, factor, beta_fast, beta_slow, attn_factor = (
-            rope_scaling.get("original_max_position_embeddings", 2048),
-            rope_scaling.get("factor", 16),
-            rope_scaling.get("beta_fast", 32.0),
-            rope_scaling.get("beta_slow", 1.0),
-            rope_scaling.get("attention_factor", 1.0),
+        orig_max,factor,beta_fast,beta_slow,attn_factor = (
+            orig_max = rope_scaling.get("original_max_position_embeddings", 2048),#模型预训练时的原始最大长度（例如 Llama-2 是 2048 或 4096）
+            factor = rope_scaling.get("factor", 16),#要扩展的倍数 s (比如从 2k 扩展到 32k，factor 就是 16)
+            beta_fast = rope_scaling.get("beta_fast", 32.0),#高频边界，波长比例大于此值的维度不缩放
+            beta_low = rope_scaling.get("beta_slow", 1.0),#低频边界，波长比例小于此值的维度全量缩放
+            attn_factor = rope_scaling.get("attention_factor", 1.0)
+
         )
-
-        # 只有当要推断的长度大于原始训练长度时，才应用缩放
-        if end / orig_max > 1.0:
-            # 3. 使用前文推导的公式，定义波长比例 b 到维度索引 i 的映射函数
-            inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (
-                2 * math.log(rope_base)
-            )
-
-            # 4. 计算高频区和低频区的维度切分点
-            # low: 不需要缩放的高频部分的最高索引
-            # high: 需要完全缩放的低频部分的最低索引
+        if end /orig_max > 1.0:#输入长度大于原始最大长度时，进行缩放
+            
+            #inv_dim: 频率逆向变换,是一个函数
+            inv_dim = lambda b: (dim * math.log(orig_max/(b*math.pi*2)))/(
+                2 * math.log(rope_base))#返回高低频维度分割下标
+            
             low, high = (
+                #floor 下取整
                 max(math.floor(inv_dim(beta_fast)), 0),
-                min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1),
+                
+                #ceil 上取整
+                min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
             )
+            
+            
+            
+            
+              # 5. 计算混合因子 γ (Ramp)
+#             # 在 low 之前，ramp 为 0；在 high 之后，ramp 为 1；在 low 和 high 之间，线性过渡。
+#             # clamp 函数限制了数值只能在 [0, 1] 之间。
 
-            # 5. 计算混合因子 γ (Ramp)
-            # 在 low 之前，ramp 为 0；在 high 之后，ramp 为 1；在 low 和 high 之间，线性过渡。
-            # clamp 函数限制了数值只能在 [0, 1] 之间。
             ramp = torch.clamp(
-                (torch.arange(dim // 2, device=freqs.device).float() - low)
-                / max(high - low, 0.001),
+                (torch.arange(dim//2, device = freqs.device()).float() - low),
                 0,
                 1,
+                
             )
-
+            
+            
             # 6. 频率融合公式：f'(i) = f(i) * ((1-γ) + γ/s)
             # 当 ramp=0 时（高频）：系数为 1，保持原频率不变。
             # 当 ramp=1 时（低频）：系数为 1/factor，即对频率进行线性插值缩放。
             # ramp在0-1之间时：平滑过渡。
-            freqs = freqs * (1 - ramp + ramp / factor)
+            
+            freqs = freqs * (1-ramp + ramp / factor)
+
 
     # 7. 根据目标长度 end，生成位置索引向量 t
+    #device=freqs.device 放到一张显卡
     t = torch.arange(end, device=freqs.device)
-
-    # 8. 计算外积：将位置 t 与处理好的频率 freqs 相乘，得到每个位置的旋转角度 θ
+    
+    #将位置 t 与处理好的频率 freqs 相乘，得到每个位置的旋转角度 θ
     freqs = torch.outer(t, freqs).float()
-
+    
+    
     # 9. 计算 Cos 和 Sin，并应用注意力补偿系数 (attn_factor)
     freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
-    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
-
+    
+    freqs_sin = torch.cat([torch.sin(freqs),torch.sin(freqs)],dim=-1) *attn_factor
+    
     return freqs_cos, freqs_sin
+
+
+
+    
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
@@ -178,3 +182,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         rotate_half(k) * sin.unsqueeze(unsqueeze_dim)
     )
     return q_embed, k_embed
+
+
+#part three
