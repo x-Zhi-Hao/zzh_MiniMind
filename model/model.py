@@ -87,16 +87,16 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 class RMSNorm(nn.Module):
     def __init__(self,dim:int,eps:float=1e-5):
         super().__init__()
-      
+
         self.eps=eps
         self.weight=nn.Parameter(torch.ones(dim))
     def _norm(self,x):
-        return x*torch.rsqrt(x.pow(2).mean(-1,keepdim=True)+self.eps)        
-    
+        return x*torch.rsqrt(x.pow(2).mean(-1,keepdim=True)+self.eps)
+
     def forward(self,x):
         return self.weight*self._norm(x.float()).type_as(x)
-    
-    
+
+
 #part two
 #RoPE & Yarn
 #precompute_freqs函数用于提前计算RoPE编码所需的余弦和正弦旋转参数。它接受以下参数：
@@ -109,9 +109,9 @@ def precompute_freqs(
     freqs, attn_factor = (
         #feqs为标准RoPE频率，attn_factor为注意力温度补偿系数
         1.0 / (rope_base ** (torch.arange(0,dim,2)[:(dim//2)].float() / dim)),#RoPE_Core_Frequency_Formula
-        1.0          
+        1.0
     )
-    
+
     if rope_scaling is not None:
         orig_max,factor,beta_fast,beta_slow,attn_factor = (
             rope_scaling.get("original_max_position_embeddings", 2048),
@@ -121,22 +121,19 @@ def precompute_freqs(
             rope_scaling.get("attention_factor", 1.0),
         )
         if end /orig_max > 1.0:#输入长度大于原始最大长度时，进行缩放
-            
+
             #inv_dim: 频率逆向变换,是一个函数
             inv_dim = lambda b: (dim * math.log(orig_max/(b*math.pi*2)))/(
                 2 * math.log(rope_base))#返回高低频维度分割下标
-            
+
             low, high = (
                 #floor 下取整
                 max(math.floor(inv_dim(beta_fast)), 0),
-                
+
                 #ceil 上取整
                 min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
             )
-            
-            
-            
-            
+
               # 5. 计算混合因子 γ (Ramp)
 #             # 在 low 之前，ramp 为 0；在 high 之后，ramp 为 1；在 low 和 high 之间，线性过渡。
 #             # clamp 函数限制了数值只能在 [0, 1] 之间。
@@ -147,34 +144,33 @@ def precompute_freqs(
                 0,
                 1,
             )
-            
-            
+
+
             # 6. 频率融合公式：f'(i) = f(i) * ((1-γ) + γ/s)
             # 当 ramp=0 时（高频）：系数为 1，保持原频率不变。
             # 当 ramp=1 时（低频）：系数为 1/factor，即对频率进行线性插值缩放。
             # ramp在0-1之间时：平滑过渡。
-            
+
             freqs = freqs * (1-ramp + ramp / factor)
 
 
     # 7. 根据目标长度 end，生成位置索引向量 t
     #device=freqs.device 放到一张显卡
     t = torch.arange(end, device=freqs.device)
-    
+
     #将位置 t 与处理好的频率 freqs 相乘，得到每个位置的旋转角度 θ
     freqs = torch.outer(t, freqs).float()
-    
-    
+
+
     # 9. 计算 Cos 和 Sin，并应用注意力补偿系数 (attn_factor)
     freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
-    
+
     freqs_sin = torch.cat([torch.sin(freqs),torch.sin(freqs)],dim=-1) *attn_factor
-    
+
     return freqs_cos, freqs_sin
 
 
 
-    
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
@@ -203,18 +199,18 @@ def repeat_kv(x :torch.Tensor, n_rep: int)-> torch.Tensor:
     #num _key_value_heads:  kv注意力头的数
     #dim ： 头的维度
     #n_rep: 重复的次数
-    
+
     bs, slen,num_key_value_heads,head_dim = x.shape
-    
+
     if n_rep == 1 :
         return x
-    
+
     return (x[:,:,:,None,:]
             .expand(bs,slen,num_key_value_heads,n_rep,head_dim)
             .reshape(bs,slen,num_key_value_heads*n_rep,head_dim)
             )
-    
-    
+
+
 class Attention(nn.Module):
     """
     根据模型配置计算 GQA 的头数关系，
@@ -348,23 +344,23 @@ class Attention(nn.Module):
             cos,
             sin,
         )
-        
+
         #凭借KV cache
-        
+
         if past_key_value is not None:
             xk = torch.cat([past_key_value[0],xk],dim=1)
             xv = torch.cat([past_key_value[1],xv],dim=1)
-        
+
         past_kv = (xk,xv) if use_cache else None
-        
+
         #扩展 K/V 头数并调整维度
-        
+
         xq,xk,xv = (
             xq.transpose(1,2),
             repeat_kv(xk,self.n_rep).transpose(1,2),
             repeat_kv(xv,self.n_rep).transpose(1,2)
         )
-        
+
         #判断是否使用PyTorch的高效注意力
         if (
             self.flash
@@ -379,16 +375,16 @@ class Attention(nn.Module):
                 dropout_p=self.dropout if self.training else 0.0,
                 is_causal=True,
                 )
-            
+
         else:
             scores = (xq @ xk.transpose(-2, -1))/(math.sqrt(self.head_dim))
-            
+
             scores[:,:,:,-seq_len:] +=(
                 torch.triu(
-                    
+
                     torch.full(
                         (seq_len,seq_len),
-                        
+
                         float("-inf"),
                         device=scores.device,
                         ),
@@ -398,75 +394,211 @@ class Attention(nn.Module):
             #添加 Padding Mask
             if attention_mask is not None:
                 extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-                extended_attention_mask = (1.0- extended_attention_mask)* -1e9 
+                extended_attention_mask = (1.0- extended_attention_mask)* -1e9
                 scores = scores + extended_attention_mask
-            
+
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            
+
             scores = self.attn_dropout(scores)
-            
-            output = scores @ xv    
-            
+
+            output = scores @ xv
+
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
-    
-    
-#part four 
+
+
+#part four
 #FNN
 
 #总体思路，升维度，降维度，以进行详细化
 class FeedForward(nn.Module):
-    
+
     def __init__(self,config:ZzhMindConfig):
         super().__init__()
-        
-        
+
+
         #如果没有显式指定中间层大小，则使用公式进行计算
         if(config.intermediate_size is None):
-            
+
             #8/3好用
             intermediate_size = int((8*config.hidden_size)//3)
-            
+
             #保证是64倍数，上取整
             config.intermediate_size = (
                 64*((intermediate_size+64 - 1)//64)
             )
-            
+
         self.gate_proj = nn.Linear(
             config.hidden_size,
             config.intermediate_size,
             bias=False,
         )
-        
+
         self.up_proj = nn.Linear(
             config.hidden_size,
             config.intermediate_size,
             bias=False,
 
         )
-        
+
         self.down_proj = nn.Linear(
             config.intermediate_size,
             config.hidden_size,
             bias=False,
         )
-        
+
         #dropout是Dropout层，可以理解为一个函数
         #丢弃概率为config.dropout的dropout函数
         self.dropout = nn.Dropout(config.dropout)
-        
+
         #根据配置里的激活函数名称，从 ACT2FN 映射表中取出对应的激活函数。
         self.act_fn = ACT2FN[config.hidden_act]
     def forward(self,x):
-        
+
         #升维
         gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-        
+
         #降维返回
         return self.dropout(self.down_proj(gated))
-    
-    
+
+
+class MoEGate(nn.Module):
+    def __init__(self, config: ZzhMindConfig):
+        super().__init__()
+        self.config = config
+        self.top_k = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+
+        self.scoring_func = config.scoring_func
+        self.alpha = config.aux_loss_alpha
+        self.seq_aux = config.seq_aux
+
+        self.norm_topk_prob = config.norm_topk_prob
+        self.gating_dim = config.hidden_size
+        self.weight = nn.Parameter(
+            torch.empty((self.n_routed_experts, self.gating_dim))
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+
+    def forward(self, hidden_states):
+        bsz, seq_len, h = hidden_states.shape
+        hidden_states = hidden_states.view(-1, h)
+        logits = F.linear(hidden_states, self.weight, None)
+
+        if self.scoring_func == "softmax":
+            scores = logits.softmax(dim=-1)
+        else:
+            raise NotImplementedError(
+                f"insupportable scoring function for MoE gating: {self.scoring_func}"
+            )
+
+        topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
+
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight = topk_weight / denominator
+
+        if self.training and self.alpha > 0.0:
+            scores_for_aux = scores
+            aux_topk = self.top_k
+            topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            if self.seq_aux:
+                scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
+                ce = torch.zeros(
+                    bsz, self.n_routed_experts, device=hidden_states.device
+                )
+                ce.scatter_add_(
+                    1,
+                    topk_idx_for_aux_loss,
+                    torch.ones(bsz, seq_len * aux_topk, device=hidden_states.device),
+                ).div_(seq_len * aux_topk / self.n_routed_experts)
+                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(
+                    dim=1
+                ).mean() * self.alpha
+            else:
+                mask_ce = F.one_hot(
+                    topk_idx_for_aux_loss.view(-1), num_classes=self.n_routed_experts
+                )
+                ce = mask_ce.float().mean(0)
+                Pi = scores_for_aux.mean(0)
+                fi = ce * self.n_routed_experts
+                aux_loss = (Pi * fi).sum() * self.alpha
+        else:
+            aux_loss = scores.new_zeros(1).squeeze()
+        return topk_idx, topk_weight, aux_loss
+
+
+class MoEFeedForward(nn.Module):
+    def __init__(self, config: ZzhMindConfig):
+        super().__init__()
+        self.config = config
+        self.experts = nn.ModuleList(
+            [FeedForward(config) for _ in range(config.n_routed_experts)]
+        )
+        self.gate = MoEGate(config)
+        if config.n_shared_experts > 0:
+            self.shared_experts = nn.ModuleList(
+                [FeedForward(config) for _ in range(config.n_shared_experts)]
+            )
+
+    def forward(self, x):
+        identity = x
+        orig_shape = x.shape
+        bsz, seq_len, h = orig_shape
+
+        topk_idx, topk_weight, aux_loss = self.gate(x)
+        x = x.view(-1, x.shape[-1])
+
+        flat_topk_idx = topk_idx.view(-1)
+        if self.training:
+            x = x.repeat_interleave(self.config.num_experts_per_tok, dim=0)
+            y = torch.empty_like(x, dtype=x.dtype)
+            for i, expert in enumerate(self.experts):
+                expert_out = expert(x[flat_topk_idx == i])
+                if expert_out.shape[0] > 0:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype)
+                else:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype) + 0 * sum(
+                        p.sum() for p in expert.parameters()
+                    )
+            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            y = y.view(*orig_shape)
+        else:
+            y = self.moe_infer(x, flat_topk_idx, topk_weight.view(-1, 1)).view(
+                *orig_shape
+            )
+        if self.config.n_shared_experts > 0:
+            for expert in self.shared_experts:
+                y = y + expert(identity)
+        self.aux_loss = aux_loss
+        return y
+
+    @torch.no_grad()
+    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
+        expert_cache = torch.zeros_like(x)
+        idxs = flat_expert_indices.argsort()
+        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
+        token_idxs = idxs // self.config.num_experts_per_tok
+        for i, end_idx in enumerate(tokens_per_expert):
+            start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
+            if start_idx == end_idx:
+                continue
+            expert = self.experts[i]
+            exp_token_idx = token_idxs[start_idx:end_idx]
+            expert_tokens = x[exp_token_idx]
+            expert_out = expert(expert_tokens).to(expert_cache.dtype)
+            expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
+            expert_cache.scatter_add_(
+                0, exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]), expert_out
+            )
+
+        return expert_cache
+
+
 class ZzhMindBlock(nn.Module):
     def __init__(self,layer_id:int,config:ZzhMindConfig):
         super().__init__()
@@ -510,10 +642,10 @@ class ZzhMindBlock(nn.Module):
             self.post_attention_layernorm(hidden_states)
         )
         return hidden_states, present_key_value
-    
+
 class ZzhMindModel(nn.Module):
     def __init__(self,config:ZzhMindConfig):
-        super.__init__()
+        super().__init__()
         self.config = config
         self.vocab_size, self.num_hidden_layers = (
             config.vocab_size,
@@ -522,7 +654,7 @@ class ZzhMindModel(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.dropout = nn.Dropout(config.dropout)
         self.layers = nn.ModuleList(
-            [MokioMindBlock(l, config) for l in range(self.num_hidden_layers)]
+            [ZzhMindBlock(l, config) for l in range(self.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -592,11 +724,10 @@ class ZzhMindModel(nn.Module):
         )
 
         return hidden_states, presents, aux_loss
-    
+
 class ZzhMindForCausalLM(PreTrainedModel, GenerationMixin):
-    config_class = ZzhMindConfig      
+    config_class = ZzhMindConfig
     def __init__(self, config: ZzhMindConfig):
-        super().__init__(config)
         super().__init__(config)
         self.model = ZzhMindModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -646,23 +777,23 @@ class ZzhMindForCausalLM(PreTrainedModel, GenerationMixin):
         output.aux_loss = aux_loss
         return output
 
-    
 
-        
-        
-        
-            
-                
-                
-                
-            
-        
-        
-            
-            
-    
-    
-    
-    
 
-    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
