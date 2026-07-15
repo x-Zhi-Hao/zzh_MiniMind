@@ -410,6 +410,67 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
+    
+    
+#part four 
+#FNN
+
+#总体思路，升维度，降维度，以进行详细化
+class FeedForward(nn.Module):
+    
+    def __init__(self,config:ZzhMindConfig):
+        super().__init__()
+        
+        
+        #如果没有显式指定中间层大小，则使用公式进行计算
+        if(config.intermediate_size is None):
+            
+            #8/3好用
+            intermediate_size = int((8*config.hidden_size)//3)
+            
+            #保证是64倍数，上取整
+            config.intermediate_size = (
+                64*((intermediate_size+64 - 1)//64)
+            )
+            
+        self.gate_proj = nn.Linear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=False,
+        )
+        
+        self.up_proj = nn.Linear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=False,
+
+        )
+        
+        self.down_proj = nn.Linear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=False,
+        )
+        
+        #dropout是Dropout层，可以理解为一个函数
+        #丢弃概率为config.dropout的dropout函数
+        self.dropout = nn.Dropout(config.dropout)
+        
+        #根据配置里的激活函数名称，从 ACT2FN 映射表中取出对应的激活函数。
+        self.act_fn = ACT2FN[config.hidden_act]
+    def forward(self,x):
+        
+        #升维
+        gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        
+        #降维返回
+        return self.dropout(self.down_proj(gated))
+    
+
+        
+        
+        
+            
                 
                 
                 
