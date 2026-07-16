@@ -44,3 +44,96 @@ class PretrainDataset(Dataset):
         # ！修正：返回 attention_mask，使 attention 层能屏蔽 padding token
         attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
         return input_ids, labels, attention_mask
+
+
+def pre_processing_chat(conversations, add_system_ratio=0.2):
+    """Optionally add a system prompt so SFT sees both chat styles."""
+    system_prompts = [
+        "你是一个知识丰富的AI，尽力为用户提供准确的信息。",
+        "你是一个专业的AI助手，请提供有价值的回答。",
+        "You are a helpful AI assistant.",
+    ]
+    if conversations and conversations[0].get("role") != "system":
+        if random.random() < add_system_ratio:
+            return [
+                {"role": "system", "content": random.choice(system_prompts)}
+            ] + conversations
+    return conversations
+
+
+class SFTDataset(Dataset):
+    """Conversation SFT dataset that computes loss only on assistant replies.
+
+    Expected JSONL format:
+    {"conversations": [{"role": "user", "content": "..."}, ...]}
+    """
+
+    def __init__(self, data_path, tokenizer, max_length=340):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.samples = load_dataset("json", data_files=data_path, split="train")
+        self.assistant_start_ids = tokenizer(
+            f"{tokenizer.bos_token}assistant\n", add_special_tokens=False
+        ).input_ids
+        self.assistant_end_ids = tokenizer(
+            f"{tokenizer.eos_token}\n", add_special_tokens=False
+        ).input_ids
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _make_prompt(self, conversations):
+        messages = list(conversations)
+        tools = (
+            conversations[0]["functions"]
+            if conversations
+            and conversations[0].get("role") == "system"
+            and conversations[0].get("functions")
+            else None
+        )
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+            tools=tools,
+        )
+
+    def _make_labels(self, input_ids):
+        labels = [-100] * len(input_ids)
+        i = 0
+        start_marker_length = len(self.assistant_start_ids)
+        end_marker_length = len(self.assistant_end_ids)
+
+        while i < len(input_ids):
+            if input_ids[i : i + start_marker_length] != self.assistant_start_ids:
+                i += 1
+                continue
+
+            start = i + start_marker_length
+            end = start
+            while end < len(input_ids):
+                if input_ids[end : end + end_marker_length] == self.assistant_end_ids:
+                    break
+                end += 1
+
+            for position in range(start, min(end + end_marker_length, self.max_length)):
+                labels[position] = input_ids[position]
+            i = end + end_marker_length if end < len(input_ids) else len(input_ids)
+
+        return labels
+
+    def __getitem__(self, index):
+        conversations = pre_processing_chat(self.samples[index]["conversations"])
+        prompt = self._make_prompt(conversations)
+        input_ids = self.tokenizer(prompt).input_ids[: self.max_length]
+        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+        labels = self._make_labels(input_ids)
+        attention_mask = (
+            torch.tensor(input_ids, dtype=torch.long) != self.tokenizer.pad_token_id
+        ).long()
+        return (
+            torch.tensor(input_ids, dtype=torch.long),
+            torch.tensor(labels, dtype=torch.long),
+            attention_mask,
+        )

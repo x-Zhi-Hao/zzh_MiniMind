@@ -150,9 +150,12 @@ def init_model(
         moe_suffix = (
             "_moe" if hasattr(lm_config, "use_moe") and lm_config.use_moe else ""
         )
-        weight_path = (
-            f"{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth"
-        )
+        if from_weight.endswith(".pth") or os.path.sep in from_weight:
+            weight_path = from_weight
+        else:
+            weight_path = (
+                f"{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth"
+            )
 
         weights = torch.load(weight_path, map_location=device)
 
