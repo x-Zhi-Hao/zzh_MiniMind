@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 import torch
 import os
 import random
+import json
 from datasets import load_dataset
 
 
@@ -84,12 +85,28 @@ class SFTDataset(Dataset):
         return len(self.samples)
 
     def _make_prompt(self, conversations):
-        messages = list(conversations)
+        # The SFT corpus contains a small tool-calling subset.  In that subset
+        # ``tools`` and ``tool_calls`` are JSON-encoded strings, whereas
+        # ``apply_chat_template`` expects Python lists/dicts.  Decode only
+        # those structural fields; user/assistant text stays untouched.
+        messages = []
+        for conversation in conversations:
+            message = dict(conversation)
+            for field in ("functions", "tools", "tool_calls"):
+                value = message.get(field)
+                if isinstance(value, str):
+                    try:
+                        message[field] = json.loads(value)
+                    except json.JSONDecodeError:
+                        # Keep malformed optional metadata as-is.  Normal
+                        # conversational samples do not use these fields.
+                        pass
+            messages.append(message)
+
         tools = (
-            conversations[0]["functions"]
-            if conversations
-            and conversations[0].get("role") == "system"
-            and conversations[0].get("functions")
+            messages[0].get("tools") or messages[0].get("functions")
+            if messages
+            and messages[0].get("role") == "system"
             else None
         )
         return self.tokenizer.apply_chat_template(
