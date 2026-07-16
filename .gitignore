@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Downloaded model checkpoints stay local and are not committed to Git.
+weights/
